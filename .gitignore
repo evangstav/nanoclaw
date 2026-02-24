@@ -14,12 +14,15 @@ groups/*
 !groups/main/
 !groups/global/
 !groups/pr-review/
+!groups/task-report/
 groups/main/*
 groups/global/*
 groups/pr-review/*
+groups/task-report/*
 !groups/main/CLAUDE.md
 !groups/global/CLAUDE.md
 !groups/pr-review/CLAUDE.md
+!groups/task-report/CLAUDE.md
 
 # Secrets
 *.keys.json
