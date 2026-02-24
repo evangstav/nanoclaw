@@ -210,8 +210,8 @@ async function handleQrBrowser(
   const qrData = fs.readFileSync(qrFile, 'utf-8');
   try {
     const svg = execSync(
-      `node -e "const QR=require('qrcode');const data=${JSON.stringify(qrData)};QR.toString(data,{type:'svg'},(e,s)=>{if(e)process.exit(1);process.stdout.write(s)})"`,
-      { cwd: projectRoot, encoding: 'utf-8' },
+      `node -e "const QR=require('qrcode');let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>QR.toString(d.trim(),{type:'svg'},(e,s)=>{if(e)process.exit(1);process.stdout.write(s)}))"`,
+      { cwd: projectRoot, encoding: 'utf-8', input: qrData },
     );
     const html = QR_AUTH_TEMPLATE.replace('{{QR_SVG}}', svg);
     const htmlPath = path.join(projectRoot, 'store', 'qr-auth.html');
