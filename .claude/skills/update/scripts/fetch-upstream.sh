@@ -8,20 +8,35 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 cd "$PROJECT_ROOT"
 
-# Determine the correct remote
+# Determine the correct remote for fetching upstream (qwibitai/NanoClaw).
+# Supports three setups:
+#   1. Fork: origin=user/nanoclaw, upstream=qwibitai/nanoclaw  → use upstream
+#   2. Direct clone: origin=qwibitai/nanoclaw                  → use origin
+#   3. No upstream: origin=user/nanoclaw, no upstream           → auto-add upstream
 REMOTE=""
+FORK_ORIGIN=""
+UPSTREAM_URL="https://github.com/qwibitai/nanoclaw.git"
+
 if git remote get-url upstream &>/dev/null; then
   REMOTE="upstream"
-elif git remote get-url origin &>/dev/null; then
+fi
+
+if [ -z "$REMOTE" ] && git remote get-url origin &>/dev/null; then
   ORIGIN_URL=$(git remote get-url origin)
-  if echo "$ORIGIN_URL" | grep -q "qwibitai/nanoclaw"; then
+  if echo "$ORIGIN_URL" | grep -qi "qwibitai/nanoclaw"; then
     REMOTE="origin"
+  else
+    # origin is a fork — remember it for the status block, auto-add upstream
+    FORK_ORIGIN="$ORIGIN_URL"
+    echo "Detected fork at origin ($ORIGIN_URL). Adding upstream → $UPSTREAM_URL"
+    git remote add upstream "$UPSTREAM_URL"
+    REMOTE="upstream"
   fi
 fi
 
 if [ -z "$REMOTE" ]; then
-  echo "No upstream remote found. Adding upstream → https://github.com/qwibitai/nanoclaw.git"
-  git remote add upstream https://github.com/qwibitai/nanoclaw.git
+  echo "No upstream remote found. Adding upstream → $UPSTREAM_URL"
+  git remote add upstream "$UPSTREAM_URL"
   REMOTE="upstream"
 fi
 
@@ -78,6 +93,7 @@ echo ""
 echo "<<< STATUS"
 echo "TEMP_DIR=$TEMP_DIR"
 echo "REMOTE=$REMOTE"
+echo "FORK_ORIGIN=$FORK_ORIGIN"
 echo "CURRENT_VERSION=$CURRENT_VERSION"
 echo "NEW_VERSION=$NEW_VERSION"
 echo "STATUS=success"

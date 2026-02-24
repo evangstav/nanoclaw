@@ -44,6 +44,7 @@ Run the fetch script:
 Parse the structured status block between `<<< STATUS` and `STATUS >>>` markers. Extract:
 - `TEMP_DIR` — path to extracted upstream files
 - `REMOTE` — which git remote was used
+- `FORK_ORIGIN` — if non-empty, `origin` is a fork (URL of the fork). Save this for step 10.
 - `CURRENT_VERSION` — version from local `package.json`
 - `NEW_VERSION` — version from upstream `package.json`
 - `STATUS` — "success" or "error"
@@ -157,9 +158,25 @@ Report final status:
 - Any warnings (failed custom patches, failed skill tests, migration issues)
 - Build and test status
 
+## 10. Push to fork
+
+**If `FORK_ORIGIN` was non-empty** (detected in step 2), the user has a fork setup:
+- `origin` → user's fork
+- `upstream` → `qwibitai/NanoClaw`
+
+Commit the update changes and push to the fork:
+
+```bash
+git add -A
+git commit -m "chore: update NanoClaw from {CURRENT_VERSION} to {NEW_VERSION}"
+git push origin main
+```
+
+**If `FORK_ORIGIN` was empty**, the user cloned directly from upstream. Skip this step — don't push to `qwibitai/NanoClaw` without explicit permission.
+
 ## Troubleshooting
 
-**No upstream remote:** The fetch script auto-adds `upstream` pointing to `https://github.com/qwibitai/nanoclaw.git`. If the user forked from a different URL, they should set the remote manually: `git remote add upstream <url>`.
+**No upstream remote:** The fetch script auto-detects fork setups. If `origin` points to the user's fork (not `qwibitai/nanoclaw`), it auto-adds `upstream → https://github.com/qwibitai/nanoclaw.git`. If your upstream is at a different URL, set it manually: `git remote add upstream <url>`.
 
 **Merge conflicts in many files:** Consider whether the user has heavily customized core files. Suggest using the skills system for modifications instead of direct edits, as skills survive updates better.
 
