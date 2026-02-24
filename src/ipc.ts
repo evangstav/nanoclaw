@@ -11,7 +11,7 @@ import {
   TIMEZONE,
 } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import { createTask, deleteTask, getTaskById, getTasksForGroup, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -76,9 +76,13 @@ export function startIpcWatcher(deps: IpcDeps): void {
               if (data.type === 'message' && data.chatJid && data.text) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
+                // Also allow if this group has an active scheduled task targeting this chatJid
+                const hasScheduledTask = !isMain && getTasksForGroup(sourceGroup)
+                  .some(t => t.chat_jid === data.chatJid && t.status === 'active');
                 if (
                   isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
+                  (targetGroup && targetGroup.folder === sourceGroup) ||
+                  hasScheduledTask
                 ) {
                   if (data.sender && data.chatJid.startsWith('tg:')) {
                     await sendPoolMessage(

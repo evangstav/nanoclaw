@@ -227,6 +227,19 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
+        // Advance next_run BEFORE enqueuing so the scheduler won't re-find
+        // the same task as due on subsequent polls while it's still running.
+        if (currentTask.schedule_type === 'cron') {
+          const interval = CronExpressionParser.parse(currentTask.schedule_value, { tz: TIMEZONE });
+          updateTask(currentTask.id, { next_run: interval.next().toISOString() });
+        } else if (currentTask.schedule_type === 'interval') {
+          const ms = parseInt(currentTask.schedule_value, 10);
+          updateTask(currentTask.id, { next_run: new Date(Date.now() + ms).toISOString() });
+        } else {
+          // 'once' tasks — clear next_run so they don't re-trigger
+          updateTask(currentTask.id, { next_run: null });
+        }
+
         deps.queue.enqueueTask(
           currentTask.chat_jid,
           currentTask.id,
