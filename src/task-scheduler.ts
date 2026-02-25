@@ -215,6 +215,9 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
   const loop = async () => {
     try {
+      // Kill containers stuck past wall-clock max age (catches OS-sleep survivors)
+      deps.queue.reapStaleContainers();
+
       const dueTasks = getDueTasks();
       if (dueTasks.length > 0) {
         logger.info({ count: dueTasks.length }, 'Found due tasks');

@@ -1,8 +1,9 @@
-import { ChildProcess } from 'child_process';
+import { ChildProcess, exec } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
+import { stopContainer } from './container-runtime.js';
 import { logger } from './logger.js';
 
 interface QueuedTask {
@@ -13,9 +14,13 @@ interface QueuedTask {
 
 const MAX_RETRIES = 5;
 const BASE_RETRY_MS = 5000;
+// Wall-clock maximum age for any container. Catches containers that survive
+// setTimeout-based timeouts (e.g. when the OS suspends and timers freeze).
+const STALE_CONTAINER_MAX_AGE_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 interface GroupState {
   active: boolean;
+  activeSince: number | null;
   idleWaiting: boolean;
   isTaskContainer: boolean;
   pendingMessages: boolean;
@@ -39,6 +44,7 @@ export class GroupQueue {
     if (!state) {
       state = {
         active: false,
+        activeSince: null,
         idleWaiting: false,
         isTaskContainer: false,
         pendingMessages: false,
@@ -187,6 +193,7 @@ export class GroupQueue {
   ): Promise<void> {
     const state = this.getGroup(groupJid);
     state.active = true;
+    state.activeSince = Date.now();
     state.idleWaiting = false;
     state.isTaskContainer = false;
     state.pendingMessages = false;
@@ -211,6 +218,7 @@ export class GroupQueue {
       this.scheduleRetry(groupJid, state);
     } finally {
       state.active = false;
+      state.activeSince = null;
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
@@ -222,6 +230,7 @@ export class GroupQueue {
   private async runTask(groupJid: string, task: QueuedTask): Promise<void> {
     const state = this.getGroup(groupJid);
     state.active = true;
+    state.activeSince = Date.now();
     state.idleWaiting = false;
     state.isTaskContainer = true;
     this.activeCount++;
@@ -237,6 +246,7 @@ export class GroupQueue {
       logger.error({ groupJid, taskId: task.id, err }, 'Error running task');
     } finally {
       state.active = false;
+      state.activeSince = null;
       state.isTaskContainer = false;
       state.process = null;
       state.containerName = null;
@@ -315,6 +325,37 @@ export class GroupQueue {
         );
       }
       // If neither pending, skip this group
+    }
+  }
+
+  /**
+   * Kill containers that have been running longer than STALE_CONTAINER_MAX_AGE_MS.
+   * This catches containers that survive setTimeout-based timeouts when the OS
+   * suspends (WSL2 sleep, laptop lid close, etc.) and timers freeze.
+   * Called from the scheduler loop every 60s.
+   */
+  reapStaleContainers(): void {
+    const now = Date.now();
+    for (const [groupJid, state] of this.groups) {
+      if (!state.active || !state.activeSince || !state.process) continue;
+      const age = now - state.activeSince;
+      if (age < STALE_CONTAINER_MAX_AGE_MS) continue;
+
+      const ageMin = Math.round(age / 60000);
+      logger.warn(
+        { groupJid, containerName: state.containerName, ageMin },
+        'Reaping stale container (exceeded wall-clock max age)',
+      );
+
+      if (state.containerName) {
+        exec(stopContainer(state.containerName), { timeout: 15000 }, (err) => {
+          if (err && state.process && !state.process.killed) {
+            state.process.kill('SIGKILL');
+          }
+        });
+      } else if (state.process && !state.process.killed) {
+        state.process.kill('SIGKILL');
+      }
     }
   }
 

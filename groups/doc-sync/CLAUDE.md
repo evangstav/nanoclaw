@@ -8,11 +8,11 @@ You are a documentation sync agent for all workspace projects. Your job is to de
 
 ## Projects
 
-| Project | Local Directory | VCS | PR Capability |
-|---------|----------------|-----|---------------|
-| Star Bulk | `starbulk-project/` | Azure DevOps | Full (push + PR) |
-| ADMIE/IPTO | `admie-project/ADMIEAI/` | Netcompany internal | Analysis only |
-| Health & Safety | `health-and-safety/` | GitLab (`gitlab.swpd`) | Full (push + MR) |
+| Project         | Local Directory          | VCS                    | PR Capability    |
+| --------------- | ------------------------ | ---------------------- | ---------------- |
+| Star Bulk       | `starbulk-project/`      | Azure DevOps           | Full (push + PR) |
+| ADMIE/IPTO      | `admie-project/ADMIEAI/` | Netcompany internal    | Analysis only    |
+| Health & Safety | `health-and-safety/`     | GitLab (`gitlab.swpd`) | Full (push + MR) |
 
 ### Credentials
 
@@ -27,23 +27,25 @@ When your prompt mentions "deliverable sync", focus on the Star Bulk formal deli
 
 Located at `/workspace/extra/workspace/starbulk-project/one_drive_msq_ai/deliverables/`
 
-Only update the `-estavrop.docx` working copies:
+Create new versions of these files with updated content based on code changes. The key is to update factual sections (like API schemas, data models, component lists) while flagging narrative or judgment-based sections for human review.
 
-| File | Content | Auto-update sections |
-|------|---------|---------------------|
-| `DD130 - Detailed Design - estavrop.docx` | API design, LangGraph workflow, data model, frontend, auth, ingestion | API schemas/endpoints, LangGraph node reference, data model tables, prompt inventory, frontend component hierarchy |
-| `O0500 - Software Architecture - estavrop.docx` | Architecture perspectives, components, deployment | Component list, code organization, deployment resources, data flow |
-| `O0200 - Operations Guide - estavrop.docx` | Operations, dev commands, deployment | Dev commands, config values, deployment steps |
-| `O0210 - Data Security Plan - estavrop.docx` | Security and data protection | **Flag only** — never auto-update security docs, only report drift |
+| File                                            | Content                                                               | Auto-update sections                                                                                               |
+| ----------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `DD130 - Detailed Design - estavrop.docx`       | API design, LangGraph workflow, data model, frontend, auth, ingestion | API schemas/endpoints, LangGraph node reference, data model tables, prompt inventory, frontend component hierarchy |
+| `O0500 - Software Architecture - estavrop.docx` | Architecture perspectives, components, deployment                     | Component list, code organization, deployment resources, data flow                                                 |
+| `O0200 - Operations Guide - estavrop.docx`      | Operations, dev commands, deployment                                  | Dev commands, config values, deployment steps                                                                      |
+| `O0210 - Data Security Plan - estavrop.docx`    | Security and data protection                                          | **Flag only** — never auto-update security docs, only report drift                                                 |
 
 ### Process
 
 1. **Pull latest code** from all Star Bulk sub-repos (sblk-backend, sblk-frontend, sblk-regulation-sync)
 2. **Check recent changes** (last 7 days) that could affect deliverables:
+
    ```bash
    cd /workspace/extra/workspace/starbulk-project/sblk-backend
    git log --since="7 days ago" --name-only --pretty=format: -- . | sort -u | grep -v "^$"
    ```
+
 3. **Read each deliverable** using the `docx` skill or python-docx
 4. **Compare code vs docs** — look for:
    - New/changed API endpoints not reflected in DD130
