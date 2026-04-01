@@ -1,6 +1,11 @@
 import { Api, Bot } from 'grammy';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import {
+  ASSISTANT_NAME,
+  TELEGRAM_BOT_POOL,
+  TELEGRAM_BOT_TOKEN,
+  TRIGGER_PATTERN,
+} from '../config.js';
 import { logger } from '../logger.js';
 import {
   Channel,
@@ -8,6 +13,7 @@ import {
   OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
+import { registerChannel } from './registry.js';
 
 // Bot pool for agent teams: send-only Api instances (no polling)
 const poolApis: Api[] = [];
@@ -236,7 +242,7 @@ export class TelegramChannel implements Channel {
     });
 
     // Start polling — returns a Promise that resolves when started
-    return new Promise<void>((resolve) => {
+    await new Promise<void>((resolve) => {
       this.bot!.start({
         onStart: (botInfo) => {
           logger.info(
@@ -251,6 +257,11 @@ export class TelegramChannel implements Channel {
         },
       });
     });
+
+    // Initialize bot pool for agent teams (send-only bots for multi-identity messaging)
+    if (TELEGRAM_BOT_POOL.length > 0) {
+      await initBotPool(TELEGRAM_BOT_POOL);
+    }
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {
@@ -306,3 +317,8 @@ export class TelegramChannel implements Channel {
     }
   }
 }
+
+registerChannel('telegram', (opts) => {
+  if (!TELEGRAM_BOT_TOKEN) return null;
+  return new TelegramChannel(TELEGRAM_BOT_TOKEN, opts);
+});

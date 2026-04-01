@@ -6,6 +6,8 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
   TRIGGER_PATTERN: /^@Andy\b/i,
+  TELEGRAM_BOT_TOKEN: 'test-token',
+  TELEGRAM_BOT_POOL: [],
 }));
 
 // Mock logger
