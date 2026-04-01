@@ -78,6 +78,26 @@ export interface TaskRunLog {
   error: string | null;
 }
 
+// --- Memory / Summary DAG ---
+
+export interface Summary {
+  id: string;
+  chat_jid: string;
+  level: number; // 0 = leaf (message chunk), 1+ = higher
+  content: string;
+  token_estimate: number;
+  start_timestamp: string;
+  end_timestamp: string;
+  message_count: number;
+  created_at: string;
+}
+
+export interface SummarySource {
+  summary_id: string;
+  source_type: 'message' | 'summary';
+  source_id: string;
+}
+
 // --- Channel abstraction ---
 
 export interface Channel {

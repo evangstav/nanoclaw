@@ -8,6 +8,7 @@ import {
 import {
   escapeXml,
   formatMessages,
+  formatMessagesWithContext,
   formatOutbound,
   stripInternalTags,
 } from './router.js';
@@ -124,6 +125,64 @@ describe('formatMessages', () => {
     expect(result).toContain('1:30');
     expect(result).toContain('PM');
     expect(result).toContain('<context timezone="America/New_York" />');
+  });
+});
+
+// --- formatMessagesWithContext ---
+
+describe('formatMessagesWithContext', () => {
+  const TZ = 'UTC';
+
+  it('includes preamble between header and messages', () => {
+    const preamble = '<memory_context>\n  <summary level="0" period="2026-03-31" messages="42" id="s-abc">Test</summary>\n</memory_context>';
+    const result = formatMessagesWithContext([makeMsg()], TZ, preamble);
+
+    // Structure: header, preamble, messages
+    const headerIdx = result.indexOf('<context timezone="UTC" />');
+    const preambleIdx = result.indexOf('<memory_context>');
+    const messagesIdx = result.indexOf('<messages>');
+
+    expect(headerIdx).toBeGreaterThanOrEqual(0);
+    expect(preambleIdx).toBeGreaterThan(headerIdx);
+    expect(messagesIdx).toBeGreaterThan(preambleIdx);
+  });
+
+  it('without preamble behaves same as formatMessages', () => {
+    const msgs = [makeMsg()];
+    const withContext = formatMessagesWithContext(msgs, TZ);
+    const plain = formatMessages(msgs, TZ);
+
+    expect(withContext).toBe(plain);
+  });
+
+  it('with undefined preamble behaves same as formatMessages', () => {
+    const msgs = [makeMsg()];
+    const withContext = formatMessagesWithContext(msgs, TZ, undefined);
+    const plain = formatMessages(msgs, TZ);
+
+    expect(withContext).toBe(plain);
+  });
+
+  it('with empty string preamble produces no extra whitespace', () => {
+    const msgs = [makeMsg()];
+    const result = formatMessagesWithContext(msgs, TZ, '');
+    const plain = formatMessages(msgs, TZ);
+
+    // Empty string preamble should be the same as no preamble
+    expect(result).toBe(plain);
+  });
+
+  it('formats messages the same way as formatMessages', () => {
+    const msgs = [
+      makeMsg({ sender_name: 'Alice', content: 'hi' }),
+      makeMsg({ id: '2', sender_name: 'Bob', content: 'hey' }),
+    ];
+    const result = formatMessagesWithContext(msgs, TZ, 'some context');
+
+    expect(result).toContain('sender="Alice"');
+    expect(result).toContain('sender="Bob"');
+    expect(result).toContain('>hi</message>');
+    expect(result).toContain('>hey</message>');
   });
 });
 

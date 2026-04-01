@@ -9,6 +9,8 @@ import {
   NewMessage,
   RegisteredGroup,
   ScheduledTask,
+  Summary,
+  SummarySource,
   TaskRunLog,
 } from './types.js';
 
@@ -82,7 +84,79 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+
+    -- Summary DAG tables
+    CREATE TABLE IF NOT EXISTS summaries (
+      id TEXT PRIMARY KEY,
+      chat_jid TEXT NOT NULL,
+      level INTEGER NOT NULL DEFAULT 0,
+      content TEXT NOT NULL,
+      token_estimate INTEGER NOT NULL,
+      start_timestamp TEXT NOT NULL,
+      end_timestamp TEXT NOT NULL,
+      message_count INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (chat_jid) REFERENCES chats(jid)
+    );
+    CREATE INDEX IF NOT EXISTS idx_summaries_chat
+      ON summaries(chat_jid, level, end_timestamp);
+
+    CREATE TABLE IF NOT EXISTS summary_sources (
+      summary_id TEXT NOT NULL,
+      source_type TEXT NOT NULL CHECK(source_type IN ('message','summary')),
+      source_id TEXT NOT NULL,
+      PRIMARY KEY (summary_id, source_id),
+      FOREIGN KEY (summary_id) REFERENCES summaries(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_summary_src_reverse ON summary_sources(source_id);
   `);
+
+  // FTS5 virtual table for full-text search over messages.
+  // Created separately because CREATE VIRTUAL TABLE cannot be inside a
+  // multi-statement exec block with other DDL.
+  database.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+      content, sender_name,
+      content='messages', content_rowid='rowid'
+    );
+  `);
+
+  // Triggers to keep FTS index in sync with the messages table.
+  try {
+    database.exec(`
+      CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages
+      BEGIN
+        INSERT INTO messages_fts(rowid, content, sender_name)
+        VALUES (new.rowid, new.content, new.sender_name);
+      END;
+    `);
+  } catch {
+    /* trigger already exists */
+  }
+  try {
+    database.exec(`
+      CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages
+      BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content, sender_name)
+        VALUES ('delete', old.rowid, old.content, old.sender_name);
+      END;
+    `);
+  } catch {
+    /* trigger already exists */
+  }
+  try {
+    database.exec(`
+      CREATE TRIGGER messages_fts_update AFTER UPDATE ON messages
+      BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content, sender_name)
+        VALUES ('delete', old.rowid, old.content, old.sender_name);
+        INSERT INTO messages_fts(rowid, content, sender_name)
+        VALUES (new.rowid, new.content, new.sender_name);
+      END;
+    `);
+  } catch {
+    /* trigger already exists */
+  }
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
@@ -154,6 +228,26 @@ export function initDatabase(): void {
 
   db = new Database(dbPath);
   createSchema(db);
+
+  // One-time FTS rebuild to backfill existing messages.
+  // The rebuild and flag-set are not transactional (FTS special commands
+  // cannot run inside explicit transactions). If the process crashes between
+  // them, rebuild runs again on next start — this is idempotent (drops and
+  // recreates shadow tables) but can be slow on large tables.
+  const ftsDone = db
+    .prepare("SELECT value FROM router_state WHERE key = 'fts_migration_done'")
+    .get() as { value: string } | undefined;
+  if (!ftsDone) {
+    try {
+      db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')");
+      db.prepare(
+        "INSERT OR REPLACE INTO router_state (key, value) VALUES ('fts_migration_done', '1')",
+      ).run();
+      logger.info('FTS5 index rebuilt from existing messages');
+    } catch (err) {
+      logger.error({ err }, 'FTS5 rebuild migration failed');
+    }
+  }
 
   // Migrate from JSON files if they exist
   migrateJsonState();
@@ -273,8 +367,19 @@ export function setLastGroupSync(): void {
  * Only call this for registered groups where message history is needed.
  */
 export function storeMessage(msg: NewMessage): void {
+  // Use ON CONFLICT DO UPDATE (not INSERT OR REPLACE) to preserve rowid.
+  // INSERT OR REPLACE = DELETE + INSERT which changes the rowid and breaks
+  // FTS5 content-table triggers that reference old.rowid / new.rowid.
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id, chat_jid) DO UPDATE SET
+       sender = excluded.sender,
+       sender_name = excluded.sender_name,
+       content = excluded.content,
+       timestamp = excluded.timestamp,
+       is_from_me = excluded.is_from_me,
+       is_bot_message = excluded.is_bot_message`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -301,7 +406,15 @@ export function storeMessageDirect(msg: {
   is_bot_message?: boolean;
 }): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id, chat_jid) DO UPDATE SET
+       sender = excluded.sender,
+       sender_name = excluded.sender_name,
+       content = excluded.content,
+       timestamp = excluded.timestamp,
+       is_from_me = excluded.is_from_me,
+       is_bot_message = excluded.is_bot_message`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -386,6 +499,187 @@ export function getLastBotMessageTimestamp(
     )
     .get(chatJid, `${botPrefix}:%`) as { ts: string | null } | undefined;
   return row?.ts ?? undefined;
+}
+
+// --- Full-text search ---
+
+export function searchMessages(
+  query: string,
+  chatJid?: string,
+  limit: number = 20,
+): NewMessage[] {
+  if (!query.trim()) return [];
+  try {
+    if (chatJid) {
+      return db
+        .prepare(
+          `SELECT m.id, m.chat_jid, m.sender, m.sender_name, m.content, m.timestamp, m.is_from_me
+           FROM messages m
+           JOIN messages_fts ON messages_fts.rowid = m.rowid
+           WHERE messages_fts MATCH ? AND m.chat_jid = ?
+           ORDER BY rank
+           LIMIT ?`,
+        )
+        .all(query, chatJid, limit) as NewMessage[];
+    }
+    return db
+      .prepare(
+        `SELECT m.id, m.chat_jid, m.sender, m.sender_name, m.content, m.timestamp, m.is_from_me
+         FROM messages m
+         JOIN messages_fts ON messages_fts.rowid = m.rowid
+         WHERE messages_fts MATCH ?
+         ORDER BY rank
+         LIMIT ?`,
+      )
+      .all(query, limit) as NewMessage[];
+  } catch (err) {
+    logger.error({ err, query }, 'FTS5 search failed');
+    return [];
+  }
+}
+
+// --- Summary DAG ---
+
+export function insertSummary(
+  summary: Summary,
+  sourceIds: Array<{ type: 'message' | 'summary'; id: string }>,
+): void {
+  const insert = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO summaries (id, chat_jid, level, content, token_estimate, start_timestamp, end_timestamp, message_count, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      summary.id,
+      summary.chat_jid,
+      summary.level,
+      summary.content,
+      summary.token_estimate,
+      summary.start_timestamp,
+      summary.end_timestamp,
+      summary.message_count,
+      summary.created_at,
+    );
+    const stmt = db.prepare(
+      `INSERT INTO summary_sources (summary_id, source_type, source_id) VALUES (?, ?, ?)`,
+    );
+    for (const src of sourceIds) {
+      stmt.run(summary.id, src.type, src.id);
+    }
+  });
+  insert();
+}
+
+export function getSummariesForChat(
+  chatJid: string,
+  level?: number,
+  limit: number = 100,
+): Summary[] {
+  if (level !== undefined) {
+    return db
+      .prepare(
+        `SELECT * FROM summaries WHERE chat_jid = ? AND level = ? ORDER BY end_timestamp DESC LIMIT ?`,
+      )
+      .all(chatJid, level, limit) as Summary[];
+  }
+  return db
+    .prepare(
+      `SELECT * FROM summaries WHERE chat_jid = ? ORDER BY level DESC, end_timestamp DESC LIMIT ?`,
+    )
+    .all(chatJid, limit) as Summary[];
+}
+
+export function getSummaryById(summaryId: string): Summary | undefined {
+  return db
+    .prepare(`SELECT * FROM summaries WHERE id = ?`)
+    .get(summaryId) as Summary | undefined;
+}
+
+export function getSummarySources(summaryId: string): SummarySource[] {
+  return db
+    .prepare(`SELECT * FROM summary_sources WHERE summary_id = ?`)
+    .all(summaryId) as SummarySource[];
+}
+
+export function getSourceMessages(summaryId: string): NewMessage[] {
+  return db
+    .prepare(
+      `SELECT m.id, m.chat_jid, m.sender, m.sender_name, m.content, m.timestamp, m.is_from_me
+       FROM messages m
+       JOIN summary_sources ss ON ss.source_id = m.id AND ss.source_type = 'message'
+       WHERE ss.summary_id = ?
+       ORDER BY m.timestamp`,
+    )
+    .all(summaryId) as NewMessage[];
+}
+
+export function getSourceSummaries(summaryId: string): Summary[] {
+  return db
+    .prepare(
+      `SELECT s.*
+       FROM summaries s
+       JOIN summary_sources ss ON ss.source_id = s.id AND ss.source_type = 'summary'
+       WHERE ss.summary_id = ?
+       ORDER BY s.end_timestamp`,
+    )
+    .all(summaryId) as Summary[];
+}
+
+/**
+ * Get messages that are not yet covered by any level-0 summary.
+ * Excludes the most recent `freshTailCount` messages (protected from compaction).
+ */
+export function getUnsummarizedMessages(
+  chatJid: string,
+  freshTailCount: number,
+): NewMessage[] {
+  // Find the end_timestamp of the latest level-0 summary for this chat
+  const latestSummary = db
+    .prepare(
+      `SELECT end_timestamp FROM summaries WHERE chat_jid = ? AND level = 0 ORDER BY end_timestamp DESC LIMIT 1`,
+    )
+    .get(chatJid) as { end_timestamp: string } | undefined;
+
+  const sinceTs = latestSummary?.end_timestamp || '';
+
+  // Get all messages after the last summary, minus the fresh tail
+  return db
+    .prepare(
+      `SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+       FROM messages
+       WHERE chat_jid = ? AND timestamp > ? AND content != '' AND content IS NOT NULL
+       ORDER BY timestamp
+       LIMIT (
+         SELECT MAX(0, COUNT(*) - ?)
+         FROM messages
+         WHERE chat_jid = ? AND timestamp > ? AND content != '' AND content IS NOT NULL
+       )`,
+    )
+    .all(chatJid, sinceTs, freshTailCount, chatJid, sinceTs) as NewMessage[];
+}
+
+/**
+ * Get level-N summaries that are not yet rolled into a level-(N+1) summary.
+ */
+export function getUncondensedSummaries(
+  chatJid: string,
+  level: number,
+): Summary[] {
+  // Use NOT EXISTS instead of NOT IN for NULL-safety.
+  // The level+1 check is self-contained in the subquery.
+  return db
+    .prepare(
+      `SELECT s.* FROM summaries s
+       WHERE s.chat_jid = ? AND s.level = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM summary_sources ss
+           JOIN summaries parent ON parent.id = ss.summary_id
+           WHERE ss.source_id = s.id
+             AND ss.source_type = 'summary'
+             AND parent.level = s.level + 1
+         )
+       ORDER BY s.end_timestamp`,
+    )
+    .all(chatJid, level) as Summary[];
 }
 
 export function createTask(

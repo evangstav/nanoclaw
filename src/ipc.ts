@@ -5,7 +5,19 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, getTasksForGroup, updateTask } from './db.js';
+import {
+  createTask,
+  deleteTask,
+  getTaskById,
+  getTasksForGroup,
+  searchMessages,
+  getSummaryById,
+  getSummariesForChat,
+  getSummarySources,
+  getSourceMessages,
+  getSourceSummaries,
+  updateTask,
+} from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -148,6 +160,81 @@ export function startIpcWatcher(deps: IpcDeps): void {
         }
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+      }
+
+      // Process memory requests from this group's IPC directory
+      const memoryDir = path.join(ipcBaseDir, sourceGroup, 'memory');
+      const memoryRespDir = path.join(ipcBaseDir, sourceGroup, 'memory-resp');
+      try {
+        if (fs.existsSync(memoryDir)) {
+          const memoryFiles = fs
+            .readdirSync(memoryDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of memoryFiles) {
+            const filePath = path.join(memoryDir, file);
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              const requestId = data.requestId as string;
+
+              if (!requestId) {
+                logger.warn({ file, sourceGroup }, 'Memory request missing requestId');
+                fs.unlinkSync(filePath);
+                continue;
+              }
+
+              let response: { requestId: string; status: string; data: unknown; error?: string };
+
+              try {
+                response = processMemoryRequest(data, sourceGroup, isMain, registeredGroups);
+              } catch (err) {
+                response = {
+                  requestId,
+                  status: 'error',
+                  data: null,
+                  error: err instanceof Error ? err.message : String(err),
+                };
+              }
+
+              // Atomic write to memory-resp directory
+              fs.mkdirSync(memoryRespDir, { recursive: true });
+              const respPath = path.join(memoryRespDir, `${requestId}.json`);
+              const tempPath = `${respPath}.tmp`;
+              fs.writeFileSync(tempPath, JSON.stringify(response, null, 2));
+              fs.renameSync(tempPath, respPath);
+
+              // Delete request file
+              fs.unlinkSync(filePath);
+
+              logger.debug(
+                { requestId, type: data.type, sourceGroup },
+                'Memory request processed',
+              );
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing memory request',
+              );
+              // Clean up any leftover temp files from a failed response write
+              try {
+                const tmpFiles = fs.readdirSync(memoryRespDir).filter((f) => f.endsWith('.tmp'));
+                for (const tmp of tmpFiles) fs.unlinkSync(path.join(memoryRespDir, tmp));
+              } catch { /* ignore — dir may not exist */ }
+              const errorDir = path.join(ipcBaseDir, 'errors');
+              fs.mkdirSync(errorDir, { recursive: true });
+              try {
+                fs.renameSync(
+                  filePath,
+                  path.join(errorDir, `${sourceGroup}-${file}`),
+                );
+              } catch { /* request file may already be deleted */ }
+            }
+          }
+        }
+      } catch (err) {
+        logger.error(
+          { err, sourceGroup },
+          'Error reading IPC memory directory',
+        );
       }
     }
 
@@ -468,5 +555,80 @@ export async function processTaskIpc(
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
+  }
+}
+
+/**
+ * Process a memory IPC request and return a response object.
+ * Authorization: non-main groups can only query their own chatJid.
+ */
+export function processMemoryRequest(
+  data: { type: string; requestId: string; query?: string; chatJid?: string; summaryId?: string; limit?: number },
+  sourceGroup: string,
+  isMain: boolean,
+  registeredGroups: Record<string, RegisteredGroup>,
+): { requestId: string; status: 'success' | 'error'; data: unknown; error?: string } {
+  const requestId = data.requestId;
+
+  // Authorization: non-main groups are always scoped to their own chatJid.
+  // Reject unregistered groups to prevent authorization bypass.
+  let scopedChatJid = data.chatJid;
+  if (!isMain) {
+    const ownJid = Object.entries(registeredGroups).find(
+      ([, g]) => g.folder === sourceGroup,
+    )?.[0];
+    if (!ownJid) {
+      return { requestId, status: 'error', data: null, error: 'Source group not registered' };
+    }
+    scopedChatJid = ownJid; // Always override — non-main groups cannot query other groups
+  }
+
+  switch (data.type) {
+    case 'memory_search': {
+      if (!data.query) {
+        return { requestId, status: 'error', data: null, error: 'Missing query parameter' };
+      }
+      const messages = searchMessages(data.query, scopedChatJid, data.limit || 20);
+      return { requestId, status: 'success', data: messages };
+    }
+
+    case 'memory_context': {
+      if (!scopedChatJid) {
+        return { requestId, status: 'error', data: null, error: 'Missing chatJid parameter' };
+      }
+      const summaries = getSummariesForChat(scopedChatJid);
+      return { requestId, status: 'success', data: summaries };
+    }
+
+    case 'memory_expand': {
+      if (!data.summaryId) {
+        return { requestId, status: 'error', data: null, error: 'Missing summaryId parameter' };
+      }
+      // Ownership check: verify the summary belongs to the requesting group
+      const summary = getSummaryById(data.summaryId);
+      if (!summary) {
+        return { requestId, status: 'success', data: { messages: [], summaries: [] } };
+      }
+      if (!isMain && scopedChatJid && summary.chat_jid !== scopedChatJid) {
+        return { requestId, status: 'error', data: null, error: 'Access denied: summary belongs to another group' };
+      }
+      const sources = getSummarySources(data.summaryId);
+      const messageSourceIds = sources.filter((s) => s.source_type === 'message');
+      const summarySourceIds = sources.filter((s) => s.source_type === 'summary');
+
+      const result: { messages?: unknown[]; summaries?: unknown[] } = {};
+
+      if (messageSourceIds.length > 0) {
+        result.messages = getSourceMessages(data.summaryId);
+      }
+      if (summarySourceIds.length > 0) {
+        result.summaries = getSourceSummaries(data.summaryId);
+      }
+
+      return { requestId, status: 'success', data: result };
+    }
+
+    default:
+      return { requestId, status: 'error', data: null, error: `Unknown memory request type: ${data.type}` };
   }
 }

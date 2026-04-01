@@ -4,20 +4,22 @@ Personal Claude assistant. See [README.md](README.md) for philosophy and setup. 
 
 ## Quick Context
 
-Single Node.js process that connects to WhatsApp, routes messages to Claude Agent SDK running in containers (Linux VMs). Each group has isolated filesystem and memory.
+Single Node.js process that connects to Telegram, routes messages to Claude Agent SDK running in containers (Linux VMs). Each group has isolated filesystem and memory. Agents have full-text search over conversation history via LCM-inspired memory system (FTS5 + summary DAG).
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `src/index.ts` | Orchestrator: state, message loop, agent invocation |
-| `src/channels/whatsapp.ts` | WhatsApp connection, auth, send/receive |
-| `src/ipc.ts` | IPC watcher and task processing |
+| `src/channels/telegram.ts` | Telegram connection, bot pool, send/receive |
+| `src/ipc.ts` | IPC watcher, task processing, memory request handler |
 | `src/router.ts` | Message formatting and outbound routing |
-| `src/config.ts` | Trigger pattern, paths, intervals |
+| `src/config.ts` | Trigger pattern, paths, intervals, memory constants |
 | `src/container-runner.ts` | Spawns agent containers with mounts |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
-| `src/db.ts` | SQLite operations |
+| `src/db.ts` | SQLite operations, FTS5 search, summary DAG |
+| `src/memory-compactor.ts` | Background summarization + DAG construction |
+| `src/memory.ts` | Context preamble assembly from summary DAG |
 | `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
 | `container/skills/agent-browser.md` | Browser automation tool (available to all agents via Bash) |
 

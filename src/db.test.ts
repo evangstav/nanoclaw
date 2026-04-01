@@ -10,6 +10,7 @@ import {
   getMessagesSince,
   getNewMessages,
   getTaskById,
+  searchMessages,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
@@ -568,5 +569,106 @@ describe('registered group isMain', () => {
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
     expect(group.isMain).toBeUndefined();
+  });
+});
+
+// --- FTS5 search ---
+
+describe('searchMessages', () => {
+  beforeEach(() => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+    storeChatMetadata('other@g.us', '2024-01-01T00:00:00.000Z');
+
+    storeMessage({
+      id: 'fts-1',
+      chat_jid: 'group@g.us',
+      sender: 'alice@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'We should discuss the quarterly budget report',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      is_from_me: false,
+    });
+    storeMessage({
+      id: 'fts-2',
+      chat_jid: 'group@g.us',
+      sender: 'bob@s.whatsapp.net',
+      sender_name: 'Bob',
+      content: 'I agree, the budget looks good this quarter',
+      timestamp: '2024-01-01T00:00:02.000Z',
+      is_from_me: false,
+    });
+    storeMessage({
+      id: 'fts-3',
+      chat_jid: 'other@g.us',
+      sender: 'carol@s.whatsapp.net',
+      sender_name: 'Carol',
+      content: 'The budget for the new project is approved',
+      timestamp: '2024-01-01T00:00:03.000Z',
+      is_from_me: false,
+    });
+    storeMessage({
+      id: 'fts-4',
+      chat_jid: 'group@g.us',
+      sender: 'alice@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'Let us schedule a meeting for next week',
+      timestamp: '2024-01-01T00:00:04.000Z',
+      is_from_me: false,
+    });
+  });
+
+  it('returns matching messages for a search term', () => {
+    const results = searchMessages('budget');
+    expect(results.length).toBe(3);
+    for (const r of results) {
+      expect(r.content.toLowerCase()).toContain('budget');
+    }
+  });
+
+  it('filters by chatJid', () => {
+    const results = searchMessages('budget', 'group@g.us');
+    expect(results.length).toBe(2);
+    for (const r of results) {
+      expect(r.chat_jid).toBe('group@g.us');
+    }
+  });
+
+  it('returns empty for no matches', () => {
+    const results = searchMessages('nonexistent-term-xyz');
+    expect(results).toHaveLength(0);
+  });
+
+  it('returns empty for empty query', () => {
+    const results = searchMessages('');
+    expect(results).toHaveLength(0);
+  });
+
+  it('returns empty for whitespace query', () => {
+    const results = searchMessages('   ');
+    expect(results).toHaveLength(0);
+  });
+
+  it('respects limit parameter', () => {
+    const results = searchMessages('budget', undefined, 1);
+    expect(results).toHaveLength(1);
+  });
+
+  it('FTS index stays in sync when a new message is inserted', () => {
+    // Initially no results for "vacation"
+    expect(searchMessages('vacation')).toHaveLength(0);
+
+    storeMessage({
+      id: 'fts-5',
+      chat_jid: 'group@g.us',
+      sender: 'alice@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'I am going on vacation next month',
+      timestamp: '2024-01-01T00:00:05.000Z',
+      is_from_me: false,
+    });
+
+    const results = searchMessages('vacation');
+    expect(results).toHaveLength(1);
+    expect(results[0].id).toBe('fts-5');
   });
 });

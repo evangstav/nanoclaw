@@ -53,7 +53,14 @@ import {
 import { resolveGroupFolderPath } from './group-folder.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  findChannel,
+  formatMessages,
+  formatMessagesWithContext,
+  formatOutbound,
+} from './router.js';
+import { assembleContextPreamble } from './memory.js';
+import { compactIfNeeded } from './memory-compactor.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -70,7 +77,7 @@ import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
-export { escapeXml, formatMessages } from './router.js';
+export { escapeXml, formatMessages, formatMessagesWithContext } from './router.js';
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
@@ -254,7 +261,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  const preamble = assembleContextPreamble(chatJid);
+  const prompt = formatMessagesWithContext(missedMessages, TIMEZONE, preamble || undefined);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -331,6 +339,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     );
     return false;
   }
+
+  // Trigger background compaction after successful agent run
+  compactIfNeeded(chatJid).catch((err) =>
+    logger.error({ err, chatJid }, 'Background compaction failed'),
+  );
 
   return true;
 }
@@ -508,7 +521,8 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
+          const pipePreamble = assembleContextPreamble(chatJid);
+          const formatted = formatMessagesWithContext(messagesToSend, TIMEZONE, pipePreamble || undefined);
 
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(

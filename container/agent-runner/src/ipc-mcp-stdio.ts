@@ -14,6 +14,8 @@ import { CronExpressionParser } from 'cron-parser';
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
+const MEMORY_DIR = path.join(IPC_DIR, 'memory');
+const MEMORY_RESP_DIR = path.join(IPC_DIR, 'memory-resp');
 
 // Context from environment variables (set by the agent runner)
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
@@ -32,6 +34,60 @@ function writeIpcFile(dir: string, data: object): string {
   fs.renameSync(tempPath, filepath);
 
   return filename;
+}
+
+interface MemoryResponse {
+  requestId: string;
+  status: 'success' | 'error';
+  data: any;
+  error?: string;
+}
+
+/**
+ * Send a memory query request to the host via IPC and wait for the response.
+ * Writes a request file to memory/, polls memory-resp/ for the answer.
+ */
+async function memoryQuery(request: Record<string, unknown>): Promise<MemoryResponse> {
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const requestData = { ...request, requestId };
+
+  // Atomic write with deterministic filename so the host can respond
+  // using the same requestId to write the response file.
+  fs.mkdirSync(MEMORY_DIR, { recursive: true });
+  const reqPath = path.join(MEMORY_DIR, `${requestId}.json`);
+  const reqTmpPath = `${reqPath}.tmp`;
+  fs.writeFileSync(reqTmpPath, JSON.stringify(requestData, null, 2));
+  fs.renameSync(reqTmpPath, reqPath);
+
+  // Poll for response
+  const respPath = path.join(MEMORY_RESP_DIR, `${requestId}.json`);
+  const POLL_MS = 200;
+  const TIMEOUT_MS = 15_000;
+  const deadline = Date.now() + TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    if (fs.existsSync(respPath)) {
+      const raw = fs.readFileSync(respPath, 'utf-8');
+      const response: MemoryResponse = JSON.parse(raw);
+      // Clean up response file
+      try { fs.unlinkSync(respPath); } catch { /* ignore */ }
+      return response;
+    }
+    await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+  }
+
+  throw new Error(`Memory query timed out after ${TIMEOUT_MS}ms (requestId: ${requestId})`);
+}
+
+/** Format a timestamp for display: [YYYY-MM-DD HH:MM] */
+function formatTs(ts: string): string {
+  try {
+    const d = new Date(ts);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  } catch {
+    return ts;
+  }
 }
 
 const server = new McpServer({
@@ -334,6 +390,172 @@ Use available_groups.json to find the JID for a group. The folder name must be c
     return {
       content: [{ type: 'text' as const, text: `Group "${args.name}" registered. It will start receiving messages immediately.` }],
     };
+  },
+);
+
+// --- Memory tools ---
+
+server.tool(
+  'memory_search',
+  'Search conversation history using full-text search. Returns matching messages with sender, timestamp, and content.',
+  {
+    query: z.string().describe('Search terms (supports AND, OR, NOT, "phrase quotes")'),
+    limit: z.number().optional().default(20).describe('Max results (default 20)'),
+  },
+  async (args) => {
+    try {
+      const result = await memoryQuery({
+        type: 'memory_search',
+        query: args.query,
+        chatJid,
+        limit: args.limit,
+      });
+
+      if (result.status === 'error') {
+        return {
+          content: [{ type: 'text' as const, text: `Search failed: ${result.error}` }],
+          isError: true,
+        };
+      }
+
+      const messages = result.data as Array<{
+        sender_name: string;
+        timestamp: string;
+        content: string;
+      }>;
+
+      if (!messages || messages.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: `No results found for "${args.query}".` }],
+        };
+      }
+
+      const formatted = messages
+        .map((m) => `[${formatTs(m.timestamp)}] ${m.sender_name}: ${m.content}`)
+        .join('\n');
+
+      return {
+        content: [{ type: 'text' as const, text: `Found ${messages.length} result(s):\n\n${formatted}` }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Memory search error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'memory_context',
+  'View the summary hierarchy for this conversation — high-level context for older periods, detail for recent days.',
+  {},
+  async () => {
+    try {
+      const result = await memoryQuery({
+        type: 'memory_context',
+        chatJid,
+      });
+
+      if (result.status === 'error') {
+        return {
+          content: [{ type: 'text' as const, text: `Context retrieval failed: ${result.error}` }],
+          isError: true,
+        };
+      }
+
+      const summaries = result.data as Array<{
+        id: string;
+        level: number;
+        content: string;
+        start_timestamp: string;
+        end_timestamp: string;
+        message_count: number;
+      }>;
+
+      if (!summaries || summaries.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: 'No summaries available yet for this conversation.' }],
+        };
+      }
+
+      const formatted = summaries
+        .map((s) => {
+          const period = `${formatTs(s.start_timestamp)} to ${formatTs(s.end_timestamp)}`;
+          return `[L${s.level}] ${period} (${s.message_count} msgs, id: ${s.id})\n${s.content}`;
+        })
+        .join('\n\n---\n\n');
+
+      return {
+        content: [{ type: 'text' as const, text: `Summary hierarchy (${summaries.length} summaries):\n\n${formatted}` }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Memory context error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'memory_expand',
+  'Expand a summary to see its source material — the original messages (level-0) or sub-summaries (level-1+).',
+  {
+    summary_id: z.string().describe('The ID of the summary to expand'),
+  },
+  async (args) => {
+    try {
+      const result = await memoryQuery({
+        type: 'memory_expand',
+        summaryId: args.summary_id,
+      });
+
+      if (result.status === 'error') {
+        return {
+          content: [{ type: 'text' as const, text: `Expand failed: ${result.error}` }],
+          isError: true,
+        };
+      }
+
+      const data = result.data as {
+        messages?: Array<{ sender_name: string; timestamp: string; content: string }>;
+        summaries?: Array<{ id: string; level: number; content: string; start_timestamp: string; end_timestamp: string; message_count: number }>;
+      };
+
+      const parts: string[] = [];
+
+      if (data.messages && data.messages.length > 0) {
+        parts.push(`Source messages (${data.messages.length}):\n`);
+        for (const m of data.messages) {
+          parts.push(`[${formatTs(m.timestamp)}] ${m.sender_name}: ${m.content}`);
+        }
+      }
+
+      if (data.summaries && data.summaries.length > 0) {
+        if (parts.length > 0) parts.push('');
+        parts.push(`Sub-summaries (${data.summaries.length}):\n`);
+        for (const s of data.summaries) {
+          const period = `${formatTs(s.start_timestamp)} to ${formatTs(s.end_timestamp)}`;
+          parts.push(`[L${s.level}] ${period} (${s.message_count} msgs, id: ${s.id})\n${s.content}\n`);
+        }
+      }
+
+      if (parts.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: `No source material found for summary ${args.summary_id}.` }],
+        };
+      }
+
+      return {
+        content: [{ type: 'text' as const, text: parts.join('\n') }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Memory expand error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
   },
 );
 

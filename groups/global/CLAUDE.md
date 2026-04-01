@@ -40,7 +40,15 @@ Files you create are saved in `/workspace/group/`. Use this for notes, research,
 
 ## Memory
 
-The `conversations/` folder contains searchable history of past conversations. Use this to recall context from previous sessions.
+You have access to full conversation history through memory tools:
+
+- `mcp__nanoclaw__memory_search` — Full-text search across past conversations. Supports AND, OR, NOT, and "phrase quotes".
+- `mcp__nanoclaw__memory_context` — View the summary hierarchy for this group's conversation history.
+- `mcp__nanoclaw__memory_expand` — Drill into a specific summary to see the original messages it was built from.
+
+Use `memory_search` when you need to recall specific facts, decisions, or past discussions. Your prompt already includes a context summary of recent history — use memory tools for deeper recall.
+
+The `conversations/` folder contains archived full transcripts from longer sessions. Use this alongside the memory tools.
 
 When you learn something important:
 - Create files for structured data (e.g., `customers.md`, `preferences.md`)

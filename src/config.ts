@@ -104,6 +104,30 @@ function resolveConfigTimezone(): string {
 }
 export const TIMEZONE = resolveConfigTimezone();
 
+// --- Memory / compaction ---
+export const FRESH_TAIL_COUNT = parseInt(
+  process.env.FRESH_TAIL_COUNT || '64',
+  10,
+); // Messages protected from compaction
+export const LEAF_CHUNK_SIZE = parseInt(
+  process.env.LEAF_CHUNK_SIZE || '50',
+  10,
+); // Messages per level-0 summary
+export const CONDENSATION_THRESHOLD = parseInt(
+  process.env.CONDENSATION_THRESHOLD || '5',
+  10,
+); // Summaries before rolling up to next level
+export const SUMMARY_MODEL =
+  process.env.SUMMARY_MODEL || 'claude-haiku-4-5-20251001';
+export const MAX_SUMMARY_TOKENS = parseInt(
+  process.env.MAX_SUMMARY_TOKENS || '300',
+  10,
+); // Target summary token budget
+export const MAX_CONTEXT_PREAMBLE_CHARS = parseInt(
+  process.env.MAX_CONTEXT_PREAMBLE_CHARS || '4000',
+  10,
+); // Max chars for summary preamble in prompt
+
 // Telegram configuration
 export const TELEGRAM_BOT_TOKEN =
   process.env.TELEGRAM_BOT_TOKEN || envConfig.TELEGRAM_BOT_TOKEN || '';

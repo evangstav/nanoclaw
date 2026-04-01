@@ -24,6 +24,22 @@ export function formatMessages(
   return `${header}<messages>\n${lines.join('\n')}\n</messages>`;
 }
 
+export function formatMessagesWithContext(
+  messages: NewMessage[],
+  timezone: string,
+  contextPreamble?: string,
+): string {
+  const header = `<context timezone="${escapeXml(timezone)}" />\n`;
+  const preamble = contextPreamble ? `${contextPreamble}\n` : '';
+
+  const lines = messages.map((m) => {
+    const displayTime = formatLocalTime(m.timestamp, timezone);
+    return `<message sender="${escapeXml(m.sender_name)}" time="${escapeXml(displayTime)}">${escapeXml(m.content)}</message>`;
+  });
+
+  return `${header}${preamble}<messages>\n${lines.join('\n')}\n</messages>`;
+}
+
 export function stripInternalTags(text: string): string {
   return text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
 }
