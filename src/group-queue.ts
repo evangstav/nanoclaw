@@ -1,4 +1,4 @@
-import { ChildProcess, exec } from 'child_process';
+import { ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -374,11 +374,13 @@ export class GroupQueue {
       );
 
       if (state.containerName) {
-        exec(stopContainer(state.containerName), { timeout: 15000 }, (err) => {
-          if (err && state.process && !state.process.killed) {
+        try {
+          stopContainer(state.containerName);
+        } catch (err) {
+          if (state.process && !state.process.killed) {
             state.process.kill('SIGKILL');
           }
-        });
+        }
       } else if (state.process && !state.process.killed) {
         state.process.kill('SIGKILL');
       }
@@ -392,7 +394,7 @@ export class GroupQueue {
     // via idle timeout or container timeout. The --rm flag cleans them up on exit.
     // This prevents WhatsApp reconnection restarts from killing working agents.
     const activeContainers: string[] = [];
-    for (const [jid, state] of this.groups) {
+    for (const [_jid, state] of this.groups) {
       if (state.process && !state.process.killed && state.containerName) {
         activeContainers.push(state.containerName);
       }
